@@ -1145,7 +1145,8 @@ class SHFL_INFO<bit sync, string mode, string type, bit return_pred> {
     [OpType, llvm_i32_ty, llvm_i32_ty]);
 }
 
-class NVVM_TCGEN05_LDST_ACCESS_SIZE<string Shape, int Num, string ElemType = "i32"> {
+class NVVM_TCGEN05_LDST_ACCESS_SIZE<string Shape, int Num,
+                                    string ElemType = "i32"> {
   int shift = !cond(!eq(Shape, "16x128b"): 1,
                     !eq(Shape, "16x256b"): 2,
                     true : 0);
@@ -1153,15 +1154,7 @@ class NVVM_TCGEN05_LDST_ACCESS_SIZE<string Shape, int Num, string ElemType = "i3
   int veclen = !shl(1, !add(Num, shift));
 
   int valid = !le(veclen, 128);
-  LLVMType type = !cond(!eq(veclen,   1): LLVMType<!cast<ValueType>(ElemType)>,
-                        !eq(veclen,   2): LLVMType<!cast<ValueType>("v"#2#ElemType)>,
-                        !eq(veclen,   4): LLVMType<!cast<ValueType>("v"#4#ElemType)>,
-                        !eq(veclen,   8): LLVMType<!cast<ValueType>("v"#8#ElemType)>,
-                        !eq(veclen,  16): LLVMType<!cast<ValueType>("v"#16#ElemType)>,
-                        !eq(veclen,  32): LLVMType<!cast<ValueType>("v"#32#ElemType)>,
-                        !eq(veclen,  64): LLVMType<!cast<ValueType>("v"#64#ElemType)>,
-                        !eq(veclen, 128): LLVMType<!cast<ValueType>("v"#128#ElemType)>,
-                        true : llvm_void_ty);
+  LLVMType type = LLVMType<!cast<ValueType>("v"#veclen#ElemType)>;
 }
 
 class NVVM_TCGEN05_MMA_BASE<string Space, bit IsSparse, string Kind = ""> {
@@ -2830,7 +2823,7 @@ class DefaultAttrsIntrinsicFlags<list<LLVMType> ret_types,
 // TMA Tensor Copy Intrinsics: S2G -> From Shared to Global memory variants
 foreach dim = 1...5 in {
   defvar tensor_dim_args = !listsplat(llvm_i32_ty, dim);
-  foreach mode = !if(!ge(dim, 3), ["tile", "im2col"], ["tile"]) in {
+  foreach mode = !if(!ge(dim, 3), ["tile", "im2col", "im2col_w"], ["tile"]) in {
     def int_nvvm_cp_async_bulk_tensor_s2g_ # mode # _ # dim # d :
       DefaultAttrsIntrinsicFlags<[],
           !listconcat([llvm_shared_ptr_ty,  // src_smem_ptr
@@ -2840,16 +2833,22 @@ foreach dim = 1...5 in {
           [llvm_i1_ty],                     // Flag for cache_hint
           [IntrConvergent, ReadOnly<ArgIndex<0>>, ReadOnly<ArgIndex<1>>]>;
 
-    // Intrinsics for TMA Copy with reduction
-    foreach red_op = ["add", "min", "max", "inc", "dec", "and", "or", "xor"] in
-      def int_nvvm_cp_async_bulk_tensor_reduce_ # red_op # _ # mode # _ # dim # d :
-        DefaultAttrsIntrinsicFlags<[],
-            !listconcat([llvm_shared_ptr_ty,  // src_smem_ptr
-                         llvm_ptr_ty],        // tensormap_ptr
-                         tensor_dim_args,     // actual tensor dims
-                        [llvm_i64_ty]),       // cache_hint
-          [llvm_i1_ty],                       // Flag for cache_hint
-          [IntrConvergent, ReadOnly<ArgIndex<0>>, ReadOnly<ArgIndex<1>>]>;
+    defvar reduce_params =
+        !listconcat([llvm_shared_ptr_ty, // src_smem_ptr
+                     llvm_ptr_ty],       // tensormap_ptr
+                    tensor_dim_args,     // actual tensor dims
+                    [llvm_i64_ty]);      // cache_hint
+    defvar red_op_idx = !size(reduce_params);
+    def int_nvvm_cp_async_bulk_tensor_reduce_ # mode # _ # dim # d :
+      DefaultAttrsIntrinsicFlags<[],
+        reduce_params,
+        [llvm_i32_ty,    // reduction operation
+         llvm_i1_ty],    // Flag for cache_hint
+        [IntrConvergent, ReadOnly<ArgIndex<0>>, ReadOnly<ArgIndex<1>>,
+        // Allowed values for red_op are {0..7} i.e. [0, 8).
+        Range<ArgIndex<red_op_idx>, 0, 8>,
+        ArgInfo<ArgIndex<red_op_idx>, [ArgName<"red_op">,
+        ImmArgPrinter<"printTMAReductionOp">]>]>;
   }
 }
 
@@ -3428,7 +3427,7 @@ let IntrProperties = [IntrArgMemOnly, IntrWriteMem, NoCapture<ArgIndex<0>>] in {
 }
 
 let IntrProperties = [IntrArgMemOnly, ImmArg<ArgIndex<1>>, IntrWriteMem,
-                      NoCapture<ArgIndex<0>>] in {
+                      NoCapture<ArgIndex<0>>, Range<ArgIndex<1>, 0, 5>] in {
   def int_nvvm_tensormap_replace_global_stride :
     DefaultAttrsIntrinsic<[], [llvm_anyptr_ty, llvm_i32_ty, llvm_i64_ty], []>;
   foreach tmap_field = ["box_dim", "global_dim", "element_stride"] in {
