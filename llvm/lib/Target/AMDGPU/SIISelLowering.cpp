@@ -18917,6 +18917,22 @@ SDValue SITargetLowering::performClampCombine(SDNode *N,
   return getCanonicalConstantFP(DCI.DAG, SDLoc(N), N->getValueType(0), F);
 }
 
+// Check if V is the exponent result of a frexp operation. Returns the frexp
+// input via FrexpInput if matched. We only match the exponent (not mantissa)
+// because V_FREXP_MANT returns its input for Inf/NaN, not zero.
+static bool isFrexpExp(SDValue V, SDValue &FrexpInput) {
+  // ISD::FFREXP returns {mant, exp} - only match if using the exp result
+  // (result number 1).
+  if (V.getOpcode() == ISD::FFREXP && V.getResNo() == 1) {
+    FrexpInput = V.getOperand(0);
+    return true;
+  }
+  if (sd_match(V, m_IntrinsicWOChain<Intrinsic::amdgcn_frexp_exp>(
+                      m_Value(FrexpInput))))
+    return true;
+  return false;
+}
+
 SDValue
 SITargetLowering::performFrexpSelectCombine(SDNode *N,
                                             DAGCombinerInfo &DCI) const {
@@ -18936,27 +18952,13 @@ SITargetLowering::performFrexpSelectCombine(SDNode *N,
   bool CondSelectsZero; // If true, condition=true selects zero
 
   // Check if FrexpVal comes from ISD::FFREXP (exponent result only) or
-  // amdgcn_frexp_exp intrinsic. We cannot optimize frexp_mant because
-  // V_FREXP_MANT returns its input for Inf/NaN, not zero.
+  // amdgcn_frexp_exp intrinsic.
   SDValue FrexpInput;
-  auto isFrexpExp = [&FrexpInput](SDValue V) {
-    // ISD::FFREXP returns {mant, exp} - only optimize if using the exp result
-    // (result number 1).
-    if (V.getOpcode() == ISD::FFREXP && V.getResNo() == 1) {
-      FrexpInput = V.getOperand(0);
-      return true;
-    }
-    if (sd_match(V, m_IntrinsicWOChain<Intrinsic::amdgcn_frexp_exp>(
-                        m_Value(FrexpInput))))
-      return true;
-    return false;
-  };
-
-  if (isFrexpExp(FalseVal)) {
+  if (isFrexpExp(FalseVal, FrexpInput)) {
     FrexpVal = FalseVal;
     ZeroVal = TrueVal;
     CondSelectsZero = true;
-  } else if (isFrexpExp(TrueVal)) {
+  } else if (isFrexpExp(TrueVal, FrexpInput)) {
     FrexpVal = TrueVal;
     ZeroVal = FalseVal;
     CondSelectsZero = false;
